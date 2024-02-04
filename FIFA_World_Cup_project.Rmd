@@ -1,0 +1,309 @@
+---
+title: "DSA2101_Project_Group208"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Introduction
+Our group chose to work on the FIFA world cup dataset. It comprises of two datasets, namely `wcmatches` and `worldcups`. `wcmatches` contains every match played from 1930 to 2018, and contains various information regarding each match such as the the time each match was played under `date` and `month`, the location the match was held under columns `country` and `city`, the winner of each match under `winning team`, as well as more football-related information such as the number of goals scored by each team, winning conditions and the stage of the tournament in which the game was played in. The `worldcups` dataset contains information regarding the year, host country and the countries of the top four winning teams. Some football-related information  such as total goal scored, games played and more were included as well. Given the hugehuge assortment of of data provided to us, our group came up with an interesting question: **"What makes a champion, a champion?"**. We analyzed various factors that could potentially contribute to the champion's path to glory. We focused on three different factors, namely _geographical influence_, the _total goals scored by the winning team_, and _overall winning percentage_. 
+
+### Loading All Required Libraries
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(maps)
+library(ggplot2)
+library(countrycode)
+library(sf)
+library(dplyr)
+library(lubridate)
+library(gridExtra)
+
+```
+
+### Loading All Datasets
+```{r message=FALSE, warning=FALSE}
+tuesdata <- tidytuesdayR::tt_load('2022-11-29')
+tuesdata <- tidytuesdayR::tt_load(2022, week = 48)
+wcmatches <- tuesdata$wcmatches
+worldcups <- tuesdata$worldcups
+```
+
+# 2. Data Cleaning and Summary
+
+Our team split data cleaning and manipulation into three main portions based on the three different visualizations. We will only talk about some of the main transformations performed in aid of our visualizations. 
+
+For `Visualization 1`, we generalized the original “group X” for the various values of X under the `stage` column in `wcmatches` into just "group stage", as the specific group was not required for our visualization. We also replaced the “Round of 16” stage into “RO16” for easy reference. We also cleaned up the round-robin like final played in 195o to include each team only once, as it is key for our visualization later on.`home_scores` and `away_scores` were calculated to find the total goals scored by both home and away teams. They are then merged into a single dataframe named `combined_score` to compute the performance map as seen in `Visualization 1`. Finally, we cleaned up the namings of some countries, such as combining _"West Germany"_ into _"Germany"_, and _"UK"_ with _"England"_
+
+For `Visualization 2`, we mainly select the year column in the `worldcups` dataset and merged it with the `wcmatches` dataset to form a single dataframe called `champions_data`. We then used this dataframe to compute the winning percentage and goal difference against total goals scored. For `Visualization 3`, we renamed the column names from home and away team to team A and B for easier reference.
+
+## Data Cleaning for Visualization 1.1
+```{r}
+wcmatches$stage <- sub(".*group.*", "Group Stage", wcmatches$stage, ignore.case = TRUE)
+wcmatches$stage <- sub(".*16.*", "RO16", wcmatches$stage)
+wc_games <- wcmatches %>%
+  filter(stage != "Final Round" |
+         (stage == "Final Round" &
+          ((home_team == "Brazil" & away_team == "Uruguay") |
+           (home_team == "Spain" & away_team == "Sweden")))) %>%
+  mutate(stage = ifelse(stage == "Final Round", "Final", stage))
+
+combined_data <- wc_games %>%
+  select(year, stage, home_team, away_team)
+
+stage_scores <- c("Group Stage" = 1, "RO16" = 2, "Quarterfinals" = 3, "Semifinals" = 6, "Third place" = 7, "Final" = 8)
+
+home_scores <- combined_data %>%
+  group_by(home_team) %>%
+  summarise(score = sum(stage_scores[stage])) %>%
+  rename(country = home_team)
+
+away_scores <- combined_data %>%
+  group_by(away_team) %>%
+  summarise(score = sum(stage_scores[stage])) %>%
+  rename(country = away_team)
+
+combined_scores <- full_join(home_scores, away_scores, by = "country") %>%
+  mutate(score = ifelse(is.na(score.x), score.y, ifelse(is.na(score.y), score.x, score.x + score.y))) %>%
+  select(country, score) %>%
+  arrange(desc(score))
+```
+
+## Data Cleaning for Visualization 1.2
+```{r warning=FALSE}
+# Import data from "map" library for Visualisation 1
+world = map_data("world") %>%
+  filter(region != "Antarctica")
+  
+# Fix Missing England on Map, as it was labelled as UK in the "map" data
+world <- world %>%
+  mutate(region = ifelse(region == "UK", "England", region))
+
+winners_map <- left_join(world, worldcups, c("region" = "winner"))
+performance_map <- left_join(world, combined_scores, c("region" = "country"))
+performance_map <- performance_map %>%
+  mutate(score = ifelse(is.na(score), 0, score))
+
+host_map <- map_data("world", region = worldcups$host)
+
+# Summarize Each Country's Winning Count
+winners_counts <- worldcups %>%
+  group_by(winner) %>%
+  summarise(wins = n()) %>%
+  # Merging West Germany's Wins with Germany's
+  mutate(wins = ifelse(winner == "Germany", wins + sum(wins[winner == "West Germany"]), wins)) %>%
+  filter(winner != "West Germany") %>%
+  arrange(desc(wins))
+
+# Summarize Central Coordinate of Each Country
+world_coordinates <- world %>%
+  group_by(region) %>%
+  summarise(
+    avg_long = mean(long),
+    avg_lat = mean(lat)
+  )
+
+# Fixing missing coordinate for England
+duplicated_row <- world_coordinates[world_coordinates$region == "UK", ]
+duplicated_row$region <- sub("UK", "England", duplicated_row$region, ignore.case = TRUE)
+world_coordinates <- rbind(world_coordinates, duplicated_row)
+
+# Winning Country's Coordinates
+winners_counts <- left_join(winners_counts, world_coordinates, by = c("winner" = "region"))
+```
+
+## Data Cleaning for Visualization 3
+```{r warning=FALSE}
+# Data Cleaning
+champions <- worldcups %>%
+  select(year, winner)
+
+champions_data <- wcmatches %>%
+  select(year, home_team, away_team, home_score, away_score, outcome) %>% #select only necessary columns
+  left_join(champions, by = "year") %>% #combine with another table
+  filter(winner == home_team | winner == away_team) #filter for champion data
+
+# Calculate winning percentage
+winning_percentage <- champions_data %>%
+  mutate(winner_team = ifelse(outcome == "H", home_team, away_team)) %>%
+  mutate(if_win = ifelse(winner == winner_team, 1, 0)) %>%
+  group_by(year) %>%
+  summarize(total_games = n(),
+            games_won = sum(if_win)) %>%
+  ungroup() %>%
+  mutate(Ratio = games_won / total_games) %>%
+  mutate(Year = year) 
+
+w = worldcups%>%
+  select(year, goals_scored)
+
+# Calculate goal difference against total goals scored
+goal_difference_against_goals_scored <- champions_data %>%
+  mutate(goals_scored = ifelse(winner == home_team, home_score, away_score),
+         goals_lost = ifelse(winner == home_team, away_score, home_score))%>%
+  select(year, winner, goals_scored, goals_lost, goals_scored) %>%
+  group_by(year) %>%
+  summarize(total_goals_scored = sum(goals_scored),
+            total_goals_lost = sum(goals_lost)) %>%
+  ungroup() %>%
+  mutate(ratio = ((total_goals_scored - total_goals_lost)/total_goals_scored )) %>%
+  mutate(Year = year, Ratio = ratio) %>%
+  select(Year,Ratio) 
+```
+
+### Data Cleaning and Visualization 3
+```{r message=FALSE}
+# Data Cleaning
+df_1 <- wcmatches %>%
+  #mutate(stage = ifelse(startsWith(stage, "Group"), "Group Stage", stage)) %>%
+  rename(
+    team_A=home_team,  
+    team_B=away_team,       
+    team_A_score=home_score,  
+    team_B_score=away_score,
+  ) %>%
+  mutate(outcome = winning_team) %>%
+  select(-outcome, -losing_team, -month) %>% 
+  left_join(worldcups, by = "year") %>%
+  mutate_all(~str_replace_all(., "United States", "USA")) %>%
+  rename (`1st` = winner,
+          `2nd` = second,
+          `3rd` = third,
+          `4th` = fourth) 
+
+  
+# Rearrange data
+df_2 <- df_1 %>% select(year, 5:8, 14:17)%>%
+    mutate(top_teams = paste(`1st`,`2nd`,`3rd`,`4th`,sep=" ")) %>%
+   filter(str_detect(top_teams,team_A) | str_detect(top_teams,team_B))
+
+# filter out teams and scores
+df_team <- df_2 %>% select(year, team_A, team_B) %>%
+  pivot_longer(cols = c(team_A, team_B), values_to = "team") %>% select(-name)
+
+df_2$team_A_score <- as.numeric(df_2$team_A_score)
+df_2$team_B_score <- as.numeric(df_2$team_B_score)
+
+df_score <- df_2 %>% select(year, team_A_score, team_B_score) %>%
+  pivot_longer(cols = c(team_A_score, team_B_score), values_to = "score") %>% select(-name)  
+
+df_top <- df_2 %>% select(year, top_teams) %>% unique()
+
+df_rank <-df_2 %>% select (year, 6:9) %>% unique() %>% pivot_longer(cols = c(`1st`,`2nd`,`3rd`,`4th`), names_to = "rank", values_to = "team") 
+
+df_3 <- data.frame(
+  year = df_team$year,
+  team = df_team$team,
+  score = df_score$score
+) %>% 
+  left_join(df_top, by = "year") %>%
+  filter(str_detect(top_teams, team)) %>%
+  group_by(year, team) %>%
+  summarize(total_score = sum(score, na.rm = TRUE)) %>%
+  left_join(df_rank, by = c("year","team")) %>%
+  arrange(year, rank)
+```
+
+# 3. Visualizations
+## Visualization 1 
+### _Each Country's Geographical Location and Overall World Cup Performance_
+
+This visualization aims to highlight the dominant role played by geographical distribution as the leading factor in the makings of a World Cup champion. We displayed the performance of every country in every past world cup by awarding varying points for each match played, with higher points for rounds further into the tournament, we also highlighted each country that has won the world cup with a **yellow dot.** This would allow us to analyse how the geographical location of a country affects its chances of becoming a World Cup champion, and what some underlying, indirect factors are.Football as we know of today originated in England, with European countries being the first to formalise the sport with standardised rules in the 1840s, and was brought over to South America through the ports of Buenos Aires, Argentina by European sailors just a couple of decades later. (Weil, E. , Rollin, . Jack , et. al., 2023). From the visualisation, we can also see that the countries from these continents perform significantly better than other continents, which can be seen from the darker colours in these two regions.
+
+```{r, fig.align='center', warning=FALSE}
+ggplot(data = world, aes(x = long, y = lat, group = group)) +
+  geom_polygon(data = world, aes(x = long, y = lat, group = group), fill = "lightgray") +
+  geom_polygon(data = performance_map, aes(x = long, y = lat, group = group, fill = score), show.legend = TRUE, color = "#496c85", size=0.1) +
+  scale_fill_gradient(low = "white", high = "darkgreen") +  # Adjust color values as needed
+  geom_point(data = winners_counts, aes(x = avg_long, y = avg_lat), inherit.aes = FALSE, size = 2, pch=21, color="black", fill="yellow", show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "Overall World Cup (WC) Performance", 
+       caption = "** each yellow dot represent a WC-winning-country") +
+  theme(
+    axis.title = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    panel.background = element_rect(fill = "white") 
+  ) +
+  guides(
+    fill = guide_legend(title = "Past WC Performance"),
+    shape = guide_legend(title = "Legend", override.aes = list(fill = "yellow", color = "black"), label = "Winning Nations")
+  )
+```
+
+## Visualization 2
+### _The Champion's Winning Percentage and Goal Difference_
+
+The winning percentage is a measure indicating the success rate of a country in competitions during the year it clinched the World Cup. Simultaneously, the goal difference against total goals scored is a ratio reflecting the disparity between the total goals scored and lost in that specific year. The visual representation underscores that a team aspiring to be the ultimate champion must display formidable competitiveness across all competitions, triumphing over a majority of its adversaries. This aligns with the World Cup qualification format, where only the victor progresses, except during the Group Stage. The depicted blue line consistently portrays winning percentages exceeding 80% for each year of the champion, except for an anomaly in 1982. This anomaly is elucidated by the ratio of goal difference against total goals scored. The goal difference signifies a team's offensive and defensive strategy, serving as an indicator of its overall performance (Evangelos, Bekris, et al., 2019). The notably low winning percentage in 1982 corresponds to a decline in the ratio of goal difference against total goals scored. This suggests that, during the 1982 World Cup, the champion, Italy, opted for a defensive strategy rather than actively seeking to score goals. This strategic choice could potentially account for the lower winning percentage compared to other champions.
+
+```{r, fig.align='center'}
+ggplot() +
+  geom_line(data = goal_difference_against_goals_scored , 
+            aes(x=Year, y = Ratio, color = "Goal Difference vs Goals Scored"), size = 0.8, 
+            lty= "dashed") +
+  geom_line(data = winning_percentage, 
+            aes(x=Year, y = Ratio, color = "Winning Percentage"), size = 1) +
+  geom_hline(yintercept = 0.8,show.legend = T, lty = "dashed")+
+  theme_minimal() +
+  scale_x_continuous(n.breaks = 10) +
+  labs(title = "Winning Percentage VS Goal Difference* Against Total Goals Scored",
+       caption = "*Goal Difference = total_goals_scored - total_goals_lost") +
+  scale_color_manual(name = "Legend", 
+                     values = c("Goal Difference vs Goals Scored" = "red", 
+                                "Winning Percentage" = "blue",
+                                "Ratio = 0.8" = "black")) +
+  theme(legend.position = "top", 
+        plot.title = element_text(face = "bold", size = 13,hjust = 0.5),
+        axis.title = element_text(size = 12)) +
+  annotate("rect", xmin = 1980, xmax = 1985, ymin = 0.4, ymax = 1, alpha = 0.2)
+```
+
+
+## Visualization 3
+### _The Champion's Goals Scored Compared to the Rest of Top-4 Teams_
+
+In this visualisation, we extracted only the top 4’s score across the year, as the goals scored by teams outside of the top 4 are less relevant. The score represents the sum of all goals scored by a team across all games in a particular year. The score percentage is calculated as the team’s score over the total score of the 4 years. The main purpose is to assess whether the champion demonstrates a higher percentage in goal scores compared to the top 4 teams.
+From the histogram graph we generated, it is evident that the champion’s performances, indicated by red bars, consistently surpass the 25% threshold represented by the white dotted line. This supports our assumption that what makes a champion a champion is probably because of its superior goal-scoring performance. It is acknowledged that there are exceptions, such as 22 percent in 1950, 21 percent in 1966, 24 percent in 1982 and 17 percent in 2010. Possible explanations include scenarios where non-champion 3  teams  obtain higher scores through penalty shoot-out when draws are not allowed.  Additionally, a champion’s strategy might prioritise defence over attack. The typical example would be the 2010 World Cup champion Spain, known for its unbreachable defence. (Phillips, 2010) There are missing values between 1938 and 1950, reflecting the absence of the World Cup during this 12-year period. 
+
+```{r, fig.align='center'}
+total_scores <- aggregate(total_score ~ year, data = df_3, FUN = sum)
+merged_data <- merge(df_3, total_scores, by = "year", suffixes = c("", "_total"))
+merged_data$percentage <- (merged_data$total_score / merged_data$total_score_total) * 100
+merged_data$rank_factor <- factor(merged_data$rank, levels = c("4th", "3rd", "2nd", "1st"))
+custom_colors <- c("1st" = "tomato4", "2nd" = "grey80", "3rd" ="grey88", "4th" = "grey93")
+bars <- merged_data[(merged_data$percentage < 25) & (merged_data$rank == "1st"), ]
+
+
+ggplot(merged_data, aes(x = year, y = percentage,  fill = rank_factor)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 25, linetype = "dotted",lwd=1.5, color = "white")+
+  geom_text(data = bars, aes(label = paste0(round(percentage, 0), "%")), 
+            position = position_stack(vjust = 0.85), 
+            size = 2.5, color = "white", show.legend = FALSE, fontface = "bold")+
+  labs(title = "Scores of Team (Percentage) by Year",
+       x = "Year",
+       y = "Percentage") +
+  scale_fill_manual(values =custom_colors) +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# 4. Discussions
+
+From Visualisation 1, a clear pattern emerges, revealing the concentration of strong football teams in Europe and North America. Notably, only countries within these two continents have secured World Cup championships, underscoring the dominance attributed to historical and financial factors. The tournament's European origin and subsequent spread to South America through colonisation provided these regions with an early advantage, translating into more available World Cup slots (Lopez, 2022). Furthermore, the financial prowess of European leagues, attracting top players globally, and significant investments in player development by South American countries contribute to their consistent success.
+
+Visualisations 2 and 3 shed light on additional critical factors defining World Cup champions. Teams with higher winning percentages and goal counts are prevalent among the champions, indicating the significance of these metrics. However, it is crucial to recognize that factors such as strategic prowess and the quality of opponents also play pivotal roles in determining championship outcomes (Lepschy et al.). Therefore, becoming a World Cup champion is a multi-faceted achievement, relying on a combination of factors that make it inherently challenging to predict.
+
+In conclusion, the path to World Cup championship is intricately woven with historical legacies, financial strengths, strategic prowess, and the ability to navigate the challenges posed by high-quality opponents. It is a nuanced journey that encompasses a multitude of variables, making it a complex and unpredictable endeavour.
+
+
+# 5. References
+
+- Brian, Phillips. (2010, July 12). Not-So-Beautiful Game. Slate. https://slate.com/culture/2010/07/spain-s-win-over-the-netherlands-brings-a-fantastic-world-cup-to-a-hacking-plodding-end.html
+- Evangelos Bekris. (2018, September). Relationship between Time and Goal Scoring of European Soccer Teams with Different League Ranking. Journal of Human Sport and Exercise, vol. 13, no. 3,  https://doi.org/10.14198/jhse.2018.133.04. 
+- Lepschy, H., Wäsche, H., & Woll, A. (n.d.). How to be successful in Football: A systematic review. The Open Sports Sciences Journal. https://opensportssciencesjournal.com/VOLUME/11/PAGE/3/ 
+- Lopez, G. (2022, December 13). The power of history. The New York Times.         https://www.nytimes.com/2022/12/13/briefing/morocco-world-cup.html 
+- Weil, E. , Rollin, . Jack , Joy, . Bernard , Giulianotti, . Richard C. and Alegi, . Peter Christopher (2023, November 11). football. Encyclopedia Britannica. https://www.britannica.com/sports/football-soccer
